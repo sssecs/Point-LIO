@@ -1,24 +1,13 @@
 #pragma once
 #include <cmath>
 #include <math.h>
-// #include <deque>
-// #include <mutex>
-// #include <thread>
 #include <csignal>
-#include <ros/ros.h>
-// #include <so3_math.h>
 #include <Eigen/Eigen>
-// #include "Estimator.h"
 #include <common_lib.h>
 #include <pcl/common/io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <nav_msgs/Odometry.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <tf/transform_broadcaster.h>
-#include <eigen_conversions/eigen_msg.h>
-#include <pcl_conversions/pcl_conversions.h>
-#include <sensor_msgs/PointCloud2.h>
 
 /// *************Preconfiguration
 
@@ -33,7 +22,7 @@ class ImuProcess
 
   ImuProcess();
   ~ImuProcess();
-  
+
   void Reset();
   void Process(const MeasureGroup &meas, PointCloudXYZI::Ptr pcl_un_);
   void set_gyr_cov(const V3D &scaler);
@@ -41,9 +30,8 @@ class ImuProcess
   void Set_init(Eigen::Vector3d &tmp_gravity, Eigen::Matrix3d &rot);
 
   MD(12, 12) state_cov = MD(12, 12)::Identity();
-  int    lidar_type;
-  V3D    gravity_;
   bool   imu_en;
+  V3D    gravity_;
   V3D    mean_acc;
   bool   imu_need_init_ = true;
   bool   after_imu_init_ = false;

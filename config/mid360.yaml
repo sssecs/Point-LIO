@@ -1,0 +1,123 @@
+/**:
+    ros__parameters:
+        # --- topics / frames ---
+        common:
+            lid_topic:  "/livox/lidar"
+            imu_topic:  "/livox/imu"
+            time_diff_lidar_to_imu: 0.0
+            # [s] subtracted from the IMU stamp
+            frame_merge_num: 10          # merge N scans into one frame (100 Hz lidar: 10 = 10 Hz effective)
+
+        frame:
+            map_frame: "map"
+            base_frame: "base_link"
+            lidar_frame: "livox_frame"
+
+        # --- preprocess ---
+        preprocess:
+            blind: 0.5
+
+        # --- filter / map resolution ---
+        filter_size_surf: 0.1            # input scan downsample voxel [m]
+        filter_size_map: 0.3             # map-publish voxel [m]
+        ivox_nearby_type: 18             # 0/6/18/26
+        space_down_sample: true
+
+        # --- EKF ---
+        prop_at_freq_of_imu: true
+        use_imu_as_input: false          # false: IMU as measurement (output model)
+        check_satu: true
+        init_map_size: 100               # (mapping mode) scans before the map initializes
+
+        mapping:
+            imu_en: true
+            extrinsic_est_en: false      # fixed lidar-IMU extrinsic (cloud+IMU already in base frame)
+            imu_time_inte: 0.005         # = 1 / IMU frequency
+            lidar_time_inte: 0.1
+            satu_acc: 3.0
+            satu_gyro: 35.0
+            acc_norm: 1.0                # 1.0: livox IMU outputs acceleration in g
+            lidar_meas_cov: 0.01
+            acc_cov_output: 500.0
+            gyr_cov_output: 1000.0
+            b_acc_cov: 0.0001
+            b_gyr_cov: 0.0001
+            imu_meas_acc_cov: 0.1
+            imu_meas_omg_cov: 0.1
+            gyr_cov_input: 0.01          # (input model)
+            acc_cov_input: 0.1           # (input model)
+            vel_cov: 20.0                # (input model)
+            plane_thr: 0.1
+            match_s: 81.0
+            ivox_grid_resolution: 0.2
+            gravity: [0.0, 0.0, -9.81]   # map-frame gravity
+            gravity_init: [0.0, 0.0, -9.81]
+            extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
+            extrinsic_R: [ 1., 0., 0.,
+                           0., 1., 0.,
+                           0., 0., 1. ]
+
+        odometry:
+            publish_odometry_without_downsample: false   # true: publish per point-batch update
+
+        publish:
+            path_en: true
+            scan_publish_en: true
+            scan_bodyframe_pub_en: false
+
+        pcd_save:
+            pcd_save_en: false
+            interval: -1
+
+        runtime_pos_log_enable: false
+
+        # --- static-map localization ---
+        localization:
+            enable_localization: true
+            enable_map_incremental: false   # never modify the pre-built map
+            leaf_size: 0.1                  # voxel size of the loaded map in the iVox [m]
+            map_path: "/mnt/hdd/localization_misc/maps/2nd_floor/pc/localization_cloud.pcd"
+            init_z: 1.2                     # z-height [m] applied to the RViz initial pose (base_link height)
+            tf_lookup_timeout: 5.0          # [s] wait for the lidar->base static TF at startup
+            initial_pose_topic: "/initialpose"
+
+            # Localization failure detection: the pose must stay close to the
+            # loaded map and move at a plausible speed. If it drifts off the map
+            # or jumps too fast, localization is declared lost and the map->base
+            # TF is suppressed until a new /initialpose re-seeds the filter.
+            failure_detect_en: true
+            max_pose_to_map_dist: 3.0       # [m] pose farther than this from the nearest map point => lost
+            max_pose_speed: 6.0             # [m/s] scan-to-scan pose displacement rate above this => lost
+
+            # Post-relocalization fly-away guard: DISABLED by default — it assumes the
+            # robot is stationary right after a re-seed, which is not true when
+            # the robot starts moving immediately (e.g. this dataset). Enable and
+            # tune when seeding a stationary robot.
+            # robot stationary, so right after a /initialpose re-seed the pose
+            # must neither drift away from nor travel a long path during a short
+            # verification window.
+            relocalization_verify_en: false
+            relocalization_verify_window: 2.0
+            relocalization_verify_max_drift: 0.3
+            relocalization_verify_max_path: 0.5
+
+            # Open3D relocalization: on /initialpose the current scan is matched
+            # against the loaded map (FPFH+RANSAC coarse, multiscale-ICP fine) and
+            # the EKF is seeded with the refined pose instead of the raw click.
+            relocalization:
+                enable: true
+                voxel_size: 0.1             # downsample voxel for the SCAN in FPFH + ICP (m)
+                map_voxel_size: 0.2         # downsample voxel for the LOADED MAP target (m)
+                scale: [1.0, 2.0, 4.0]      # multiscale ICP ladder as multiples of voxel_size
+                icp_method: 1               # 0 = point-to-point, 1 = point-to-plane, 2 = GICP
+                icp_iteration: 120
+                use_fpfh: false             # coarse FPFH+RANSAC before ICP (skip when the guess is close)
+                ransac_max_iteration: 100000
+                mutual_filter: true
+                statistical_filter: true
+                filter_neighbors: 50
+                filter_std_ratio: 3.0
+                crop_radius: 50.0           # crop the map target to +/-crop_radius m around the guess
+                min_fitness: 0.6            # min overlap ratio of the accepted match (0..1)
+                max_translation_delta: 5.0  # max correction from the initial guess [m]
+                max_rotation_delta: 2.0     # max correction from the initial guess [rad]
