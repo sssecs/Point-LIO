@@ -6,7 +6,6 @@
             imu_topic:  "/livox/imu"
             time_diff_lidar_to_imu: 0.0
             # [s] subtracted from the IMU stamp
-            frame_merge_num: 10          # merge N scans into one frame (100 Hz lidar: 10 = 10 Hz effective)
 
         frame:
             map_frame: "map"
@@ -106,6 +105,7 @@
             # the EKF is seeded with the refined pose instead of the raw click.
             relocalization:
                 enable: true
+                accumulate_frames: 20     # scans collected after /initialpose and matched as one cloud
                 voxel_size: 0.1             # downsample voxel for the SCAN in FPFH + ICP (m)
                 map_voxel_size: 0.2         # downsample voxel for the LOADED MAP target (m)
                 scale: [1.0, 2.0, 4.0]      # multiscale ICP ladder as multiples of voxel_size

@@ -40,7 +40,6 @@ extern int ivox_nearby_type;
 extern state_input state_in;
 extern state_output state_out;
 extern std::string lid_topic, imu_topic;
-extern int frame_merge_num;
 extern bool prop_at_freq_of_imu, check_satu;
 extern bool use_imu_as_input, space_down_sample;
 extern bool extrinsic_est_en, publish_odometry_without_downsample;

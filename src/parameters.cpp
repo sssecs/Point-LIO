@@ -12,7 +12,6 @@ std::vector<double> extrinR{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
 state_input state_in;
 state_output state_out;
 std::string lid_topic("/livox/lidar"), imu_topic("/livox/imu");
-int frame_merge_num = 1;
 bool prop_at_freq_of_imu = true, check_satu = true;
 bool use_imu_as_input = false, space_down_sample = true, publish_odometry_without_downsample = false;
 int  init_map_size = 100;
@@ -83,7 +82,6 @@ void readParameters(rclcpp::Node * node)
   declare_get_float("mapping.plane_thr", plane_thr);
   declare_get_string("common.lid_topic", lid_topic);
   declare_get_string("common.imu_topic", imu_topic);
-  declare_get_int("common.frame_merge_num", frame_merge_num);
   declare_get_double("common.time_diff_lidar_to_imu", time_diff_lidar_to_imu);
   declare_get_double("filter_size_surf", filter_size_surf_min);
   declare_get_double("filter_size_map", filter_size_map_min);

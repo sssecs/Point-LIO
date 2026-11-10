@@ -124,15 +124,15 @@ private:
   bool imu_pushed_ = false;
   bool lose_lid_ = false;
   int scan_count_ = 0;
-  // High-rate frame merging: accumulate frame_merge_num_ consecutive scans into
-  // one cloud (curvature offset between scans preserved) so that the downstream
-  // pipeline (EKF scan matching AND relocalization ICP) sees ~100 ms of geometry
-  // per frame, like a 10 Hz lidar. At 100 Hz a single 10 ms sweep is too sparse
-  // (~1.4k pts) for a stable match.
-  int frame_merge_num_ = 1;
-  PointCloudXYZI merge_accum_;
-  int merge_count_ = 0;
-  double merge_window_start_ = 0.0;
+  // Accumulation buffer for the relocalization scan, filled only between an
+  // /initialpose request and the seed: at high scan rates (e.g. 100 Hz) one
+  // sweep is too sparse for a stable scan-to-map ICP match, so
+  // reloc_accum_frames_ scans (~100 ms) are collected after the click and
+  // matched against the map as one dense cloud. Normal tracking is unaffected
+  // and runs at the full scan rate.
+  int reloc_accum_frames_ = 10;
+  std::deque<PointCloudXYZI::Ptr> reloc_accum_;
+  std::atomic<bool> reloc_pending_{false};
 
   // --- state carried across scans (former main() locals/globals) -------------
   bool init_map_ = false;
@@ -171,6 +171,11 @@ private:
   nav_msgs::msg::Path path_;
   nav_msgs::msg::Odometry odom_aft_mapped_;
   geometry_msgs::msg::PoseStamped msg_body_pose_;
+  // Last published TF/odom stamp, used to enforce monotonic stamps (a scan
+  // with a short sweep span can produce a lidar_end_time slightly older than
+  // the previous one; non-monotonic TF stamps make every consumer's tf buffer
+  // spam TF_OLD_DATA and can flicker displays).
+  double last_pub_stamp_ = -1.0;
   PointCloudXYZI::Ptr init_feats_world_{new PointCloudXYZI()};
   PointCloudXYZI::Ptr pcl_wait_save_{new PointCloudXYZI()};
   pcl::VoxelGrid<PointType> down_size_filter_surf_;

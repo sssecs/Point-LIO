@@ -19,17 +19,6 @@ rclcpp::Time stamp_from_sec(double sec)
   return rclcpp::Time(static_cast<int64_t>(sec * 1e9));
 }
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr to_point_xyz(const PointCloudXYZI::Ptr & cloud)
-{
-  auto out = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-  out->reserve(cloud->size());
-  for (const auto & p : cloud->points)
-  {
-    out->push_back(pcl::PointXYZ(p.x, p.y, p.z));
-  }
-  return out;
-}
-
 // Build the initial guess T_map_base from an RViz "2D Pose Estimate" message.
 // The click is 2D: z is forced to the configured init_z height.
 Eigen::Matrix4d initial_pose_to_matrix(
@@ -64,11 +53,9 @@ LaserMappingNode::LaserMappingNode()
   Q_output_ = process_noise_cov_output();
 
   RCLCPP_INFO(
-    this->get_logger(), "lidar topic: %s, imu topic: %s, frames merged: %d, frames: %s <- %s -> %s",
-    lid_topic.c_str(), imu_topic.c_str(), frame_merge_num, map_frame_.c_str(), base_frame_.c_str(),
+    this->get_logger(), "lidar topic: %s, imu topic: %s, frames: %s <- %s -> %s",
+    lid_topic.c_str(), imu_topic.c_str(), map_frame_.c_str(), base_frame_.c_str(),
     lidar_frame_.c_str());
-
-  frame_merge_num_ = std::max(1, frame_merge_num);
 
   ivox_ = std::make_shared<IVoxType>(ivox_options_);
 
@@ -140,6 +127,14 @@ LaserMappingNode::LaserMappingNode()
   }
   RCLCPP_INFO(
     this->get_logger(), "Static TF %s -> %s available.", lidar_frame_.c_str(), base_frame_.c_str());
+
+  // The listener is only needed for this one-time startup lookup. Drop it so
+  // the node stops subscribing to /tf: otherwise map->base_link data it
+  // publishes itself (and any stale external base_link data) keeps feeding the
+  // internal buffer, which spams TF_OLD_DATA warnings on every out-of-order
+  // stamp and floods the log at high TF rates.
+  tf_listener_.reset();
+  tf_buffer_.reset();
 
   // --- pre-built map ----------------------------------------------------------
   if (loc_params_.enable_localization)
@@ -245,6 +240,7 @@ void LaserMappingNode::load_params()
   this->declare_parameter<double>("localization.relocalization_verify_max_path", 0.2);
   // Open3D relocalization
   this->declare_parameter<bool>("localization.relocalization.enable", true);
+  this->declare_parameter<int>("localization.relocalization.accumulate_frames", 10);
   this->declare_parameter<double>("localization.relocalization.voxel_size", 0.2);
   this->declare_parameter<double>("localization.relocalization.map_voxel_size", 0.2);
   this->declare_parameter<std::vector<double>>("localization.relocalization.scale", std::vector<double>{1.0, 4.0, 6.0});
@@ -268,6 +264,9 @@ void LaserMappingNode::load_params()
   this->get_parameter("localization.enable_localization", loc_params_.enable_localization);
   this->get_parameter("localization.enable_map_incremental", loc_params_.enable_map_incremental);
   this->get_parameter("localization.relocalization.enable", loc_params_.relocalization_en);
+  this->get_parameter(
+    "localization.relocalization.accumulate_frames", reloc_accum_frames_);
+  reloc_accum_frames_ = std::max(1, reloc_accum_frames_);
   this->get_parameter("localization.leaf_size", loc_params_.leaf_size);
   this->get_parameter("localization.map_path", loc_params_.map_path);
   this->get_parameter("localization.init_z", loc_params_.init_z);
@@ -375,9 +374,24 @@ bool LaserMappingNode::relocalize_and_seed()
   // rejected match is treated as a failure (stay stopped, wait for a better
   // initial pose) instead of a fallback that seeds the raw guess.
   bool match_ok = false;
-  if (localizer_ready_ && !Measures.lidar->empty())
+  // Match against the scans accumulated after the /initialpose click (~100 ms
+  // of geometry) — a single sweep at 100 Hz is too sparse for a stable
+  // scan-to-map match.
+  std::deque<PointCloudXYZI::Ptr> accum;
   {
-    const auto scan_xyz = to_point_xyz(Measures.lidar);
+    std::lock_guard<std::mutex> lock(mtx_buffer_);
+    accum.swap(reloc_accum_);
+  }
+  auto scan_xyz = std::make_shared<Open3DLocalizer::Cloud>();
+  for (const auto & s : accum)
+  {
+    for (const auto & p : s->points)
+    {
+      scan_xyz->push_back(pcl::PointXYZ(p.x, p.y, p.z));
+    }
+  }
+  if (localizer_ready_ && !scan_xyz->empty())
+  {
     const auto res = localizer_.align(scan_xyz, T_map_base);
     if (res.success)
     {
@@ -644,8 +658,7 @@ void LaserMappingNode::lidar_callback(const sensor_msgs::msg::PointCloud2::Const
     std::cerr << "lidar loop back, clear buffer" << std::endl;
     lidar_buffer_.clear();
     time_buffer_.clear();
-    merge_accum_.clear();
-    merge_count_ = 0;
+    reloc_accum_.clear();
   }
   if (is_first_lidar_)
   {
@@ -655,40 +668,14 @@ void LaserMappingNode::lidar_callback(const sensor_msgs::msg::PointCloud2::Const
   PointCloudXYZI::Ptr ptr(new PointCloudXYZI(20000, 1));
   p_pre->process(cloud_transformed, ptr);
 
-  if (frame_merge_num_ > 1)
+  // Collect scans for a pending relocalization request (only after an
+  // /initialpose, never during normal tracking).
+  if (reloc_pending_.load())
   {
-    // Accumulate frame_merge_num_ consecutive scans into one cloud. The
-    // per-point curvature (offset ms w.r.t. the scan's first point) is shifted
-    // by the scan's window offset so the merged cloud keeps a continuous
-    // timeline for the per-point undistortion.
-    if (merge_count_ == 0)
-    {
-      merge_window_start_ = cur_time;
-      merge_accum_.clear();
-    }
-    const float offset_ms = static_cast<float>((cur_time - merge_window_start_) * 1000.0);
-    if (offset_ms > 0.0f)
-    {
-      for (auto & pt : ptr->points)
-      {
-        pt.curvature += offset_ms;
-      }
-    }
-    merge_accum_.insert(merge_accum_.end(), ptr->begin(), ptr->end());
-    merge_count_++;
-    if (merge_count_ >= frame_merge_num_)
-    {
-      if (merge_accum_.size() > 0)
-      {
-        PointCloudXYZI::Ptr merged(new PointCloudXYZI());
-        merged->swap(merge_accum_);
-        lidar_buffer_.emplace_back(merged);
-        time_buffer_.emplace_back(merge_window_start_);
-      }
-      merge_count_ = 0;
-    }
+    reloc_accum_.push_back(ptr);
   }
-  else if (ptr->points.size() > 0)
+
+  if (ptr->points.size() > 0)
   {
     lidar_buffer_.emplace_back(ptr);
     time_buffer_.emplace_back(cur_time);
@@ -747,7 +734,16 @@ void LaserMappingNode::initial_pose_callback(
 {
   init_pose_ = *msg;
   initial_pose_set_.store(true);
-  RCLCPP_INFO(this->get_logger(), "Initial pose received from Rviz and applied.");
+  // Start collecting scans for the relocalization match: the ICP needs
+  // ~100 ms of geometry (accumulate_frames scans), gathered from now on.
+  {
+    std::lock_guard<std::mutex> lock(mtx_buffer_);
+    reloc_accum_.clear();
+  }
+  reloc_pending_.store(true);
+  RCLCPP_INFO(
+    this->get_logger(), "Initial pose received from Rviz and applied; collecting %d scans for "
+    "relocalization.", reloc_accum_frames_);
 }
 
 bool LaserMappingNode::sync_packages(MeasureGroup & meas)
@@ -975,14 +971,13 @@ void LaserMappingNode::publish_odometry()
 {
   odom_aft_mapped_.header.frame_id = map_frame_;
   odom_aft_mapped_.child_frame_id = base_frame_;
-  if (publish_odometry_without_downsample)
+  double stamp_sec = publish_odometry_without_downsample ? time_current : lidar_end_time;
+  if (stamp_sec <= last_pub_stamp_)
   {
-    odom_aft_mapped_.header.stamp = stamp_from_sec(time_current);
+    stamp_sec = last_pub_stamp_ + 1e-4;
   }
-  else
-  {
-    odom_aft_mapped_.header.stamp = stamp_from_sec(lidar_end_time);
-  }
+  last_pub_stamp_ = stamp_sec;
+  odom_aft_mapped_.header.stamp = stamp_from_sec(stamp_sec);
   set_posestamp(odom_aft_mapped_.pose.pose);
 
   pub_odom_->publish(odom_aft_mapped_);
@@ -1165,11 +1160,24 @@ void LaserMappingNode::timer_callback()
     }
   }
 
-  // (Re-)localization request: match the current scan against the loaded map
-  // and, only on a trusted match, seed the filter. The seed scan is consumed.
+  // (Re-)localization request: once enough scans have been collected after the
+  // /initialpose click, match the accumulated cloud against the map and, only
+  // on a trusted match, seed the filter.
   if (loc_params_.enable_localization && initial_pose_set_.load())
   {
+    {
+      std::lock_guard<std::mutex> lock(mtx_buffer_);
+      if (reloc_accum_.size() < static_cast<size_t>(reloc_accum_frames_))
+      {
+        RCLCPP_INFO_THROTTLE(
+          this->get_logger(), *this->get_clock(), 1000,
+          "Collecting scans for relocalization: %zu/%d.", reloc_accum_.size(),
+          reloc_accum_frames_);
+        return;  // wait for more scans (buffer keeps filling via the callback)
+      }
+    }
     initial_pose_set_.store(false);
+    reloc_pending_.store(false);
     if (relocalize_and_seed())
     {
       return;
